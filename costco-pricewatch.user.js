@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Costco PriceWatch
 // @namespace    local.costco.pricewatch
-// @version      1.0.0
+// @version      1.0.1
 // @description  Monitor price drops on your own Costco.com purchases (30-day price-adjustment window). Local-only.
 // @match        https://www.costco.com/*
 // @updateURL    https://costco.kyle.jp/costco-pricewatch.meta.js
@@ -96,6 +96,96 @@
       pageNumber: node && node.pageNumber != null ? Number(node.pageNumber) : 1,
       pageSize: node && node.pageSize != null ? Number(node.pageSize) : 0,
       bcOrders: node && Array.isArray(node.bcOrders) ? node.bcOrders : []
+    };
+  }
+
+  function accountIdFromEmail(email) {
+    var s = String(email || '').trim().toLowerCase();
+    if (!s) return null;
+
+    var h = 5381;
+    for (var i = 0; i < s.length; i += 1) {
+      h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+    }
+    return 'a' + h.toString(16);
+  }
+
+  function maskEmail(email) {
+    var s = String(email || '').trim();
+    if (!s) return 'Account';
+
+    var at = s.indexOf('@');
+    if (at === -1) return s || 'Account';
+
+    var local = s.slice(0, at);
+    var domain = s.slice(at + 1);
+    return local.slice(0, 2) + '***@' + domain;
+  }
+
+  function extractAccountEmail(bcOrders) {
+    var found = null;
+
+    asArray(bcOrders).some(function (order) {
+      var orderEmail = String(order && order.emailAddress || '').trim().toLowerCase();
+      if (orderEmail) {
+        found = orderEmail;
+        return true;
+      }
+
+      return asArray(order && order.orderLineItems).some(function (lineItem) {
+        var lineEmail = String(lineItem && lineItem.emailAddress || '').trim().toLowerCase();
+        if (lineEmail) {
+          found = lineEmail;
+          return true;
+        }
+        return false;
+      });
+    });
+
+    return found;
+  }
+
+  function freshV2State() {
+    return {
+      schemaVersion: 2,
+      activeAccountId: null,
+      accounts: {},
+      latestVersion: null,
+      lastUpdateCheckAt: 0
+    };
+  }
+
+  function migrateState(raw) {
+    if (!raw || typeof raw !== 'object') return freshV2State();
+    if (raw.schemaVersion === 2) return raw;
+
+    var looksV1 = Object.prototype.hasOwnProperty.call(raw, 'items') ||
+      Object.prototype.hasOwnProperty.call(raw, 'warehouseNumber') ||
+      Object.prototype.hasOwnProperty.call(raw, 'clientId') ||
+      Object.prototype.hasOwnProperty.call(raw, 'lastScrapeAt') ||
+      Object.prototype.hasOwnProperty.call(raw, 'lastPriceCheckAt') ||
+      Object.prototype.hasOwnProperty.call(raw, 'latestVersion') ||
+      Object.prototype.hasOwnProperty.call(raw, 'lastUpdateCheckAt') ||
+      Object.prototype.hasOwnProperty.call(raw, 'version');
+
+    if (!looksV1) return freshV2State();
+
+    return {
+      schemaVersion: 2,
+      activeAccountId: '__legacy__',
+      accounts: {
+        __legacy__: {
+          label: 'Imported',
+          warehouseNumber: raw.warehouseNumber != null ? String(raw.warehouseNumber) : null,
+          clientId: raw.clientId != null ? String(raw.clientId) : null,
+          items: raw.items && typeof raw.items === 'object' ? raw.items : {},
+          lastScrapeAt: Number.isFinite(Number(raw.lastScrapeAt)) ? Number(raw.lastScrapeAt) : 0,
+          lastPriceCheckAt: Number.isFinite(Number(raw.lastPriceCheckAt)) ? Number(raw.lastPriceCheckAt) : 0,
+          legacy: true
+        }
+      },
+      latestVersion: raw.latestVersion != null ? String(raw.latestVersion) : null,
+      lastUpdateCheckAt: Number.isFinite(Number(raw.lastUpdateCheckAt)) ? Number(raw.lastUpdateCheckAt) : 0
     };
   }
 
@@ -333,6 +423,10 @@
   return {
     dateRangeLast30: dateRangeLast30,
     extractOrders: extractOrders,
+    accountIdFromEmail: accountIdFromEmail,
+    maskEmail: maskEmail,
+    extractAccountEmail: extractAccountEmail,
+    migrateState: migrateState,
     extractDetailLineItems: extractDetailLineItems,
     buildItemRecords: buildItemRecords,
     mergeItems: mergeItems,
@@ -510,6 +604,15 @@
   }
   .${NS}-update a:hover{ background:#1c4e8a; color:#f4efe3; }
 
+  .${NS}-accounts{ display:flex; gap:7px; flex-wrap:wrap; justify-content:center; margin:13px 0 2px; }
+  .${NS}-acct{
+    font:inherit; font-size:10px; font-weight:700; letter-spacing:.08em; cursor:pointer;
+    color:#6b6258; background:transparent; border:1.5px solid #c3b9a6; border-radius:2px; padding:5px 9px;
+    transition:background .15s ease, color .15s ease, border-color .15s ease;
+  }
+  .${NS}-acct:hover{ border-color:#1b1814; color:#1b1814; }
+  .${NS}-acct-active{ color:#1b1814; border-color:#1b1814; background:#e9e2d2; cursor:default; }
+
   .${NS}-foot{ text-align:center; margin-top:6px; }
   .${NS}-thanks{ font-size:12px; letter-spacing:.3em; color:#3f3a33; margin:14px 0 6px; }
   .${NS}-fineprint{ font-size:9.5px; color:#9a917f; letter-spacing:.08em; line-height:1.7; }
@@ -620,6 +723,22 @@
     meta.appendChild(el('span', null, 'WHS #' + (state.warehouseNumber || '—')));
     meta.appendChild(el('span', null, 'PRICES ' + ago(state.lastPriceCheckAt, now).toUpperCase()));
     r.appendChild(meta);
+
+    // --- account switcher (only with multiple accounts) ---
+    if (Array.isArray(state.accounts) && state.accounts.length > 1) {
+      const accts = el('div', c('accounts'));
+      state.accounts.forEach((a) => {
+        const label = a.label + (a.itemCount ? ' (' + a.itemCount + ')' : '');
+        const chip = el('button', c('acct') + (a.active ? ' ' + c('acct-active') : ''), label);
+        if (a.active || !actions.switchAccount) {
+          chip.disabled = a.active;
+        } else {
+          chip.addEventListener('click', () => actions.switchAccount(a.id));
+        }
+        accts.appendChild(chip);
+      });
+      r.appendChild(accts);
+    }
 
     r.appendChild(el('hr', c('rule')));
 
@@ -820,6 +939,7 @@
     '      orderNumber: sourceOrderNumber',
     '      orderTotal',
     '      warehouseNumber',
+    '      emailAddress',
     '      status',
     '      orderLineItems {',
     '        orderLineItemId',
@@ -858,14 +978,11 @@
 
   function defaultState() {
     return {
-      version: 1,
-      items: {},
-      lastScrapeAt: 0,
-      lastPriceCheckAt: 0,
+      schemaVersion: 2,
+      activeAccountId: null,
+      accounts: {},
       latestVersion: null,
-      lastUpdateCheckAt: 0,
-      warehouseNumber: null,
-      clientId: null
+      lastUpdateCheckAt: 0
     };
   }
 
@@ -911,9 +1028,8 @@
     };
   }
 
-  function normalizeState(input) {
-    var base = defaultState();
-    var src = input && typeof input === 'object' ? input : {};
+  function sanitizeAccount(account) {
+    var src = account && typeof account === 'object' ? account : {};
     var items = {};
 
     Object.keys(src.items || {}).forEach(function (key) {
@@ -925,14 +1041,40 @@
     });
 
     return {
-      version: 1,
+      label: src.label != null && String(src.label).trim() ? String(src.label) : 'Account',
+      warehouseNumber: stringOrNull(src.warehouseNumber),
+      clientId: stringOrNull(src.clientId),
       items: items,
-      lastScrapeAt: numberOrZero(src.lastScrapeAt != null ? src.lastScrapeAt : base.lastScrapeAt),
-      lastPriceCheckAt: numberOrZero(src.lastPriceCheckAt != null ? src.lastPriceCheckAt : base.lastPriceCheckAt),
-      latestVersion: stringOrNull(src.latestVersion != null ? src.latestVersion : base.latestVersion),
-      lastUpdateCheckAt: numberOrZero(src.lastUpdateCheckAt != null ? src.lastUpdateCheckAt : base.lastUpdateCheckAt),
-      warehouseNumber: stringOrNull(src.warehouseNumber != null ? src.warehouseNumber : base.warehouseNumber),
-      clientId: stringOrNull(src.clientId != null ? src.clientId : base.clientId)
+      lastScrapeAt: numberOrZero(src.lastScrapeAt),
+      lastPriceCheckAt: numberOrZero(src.lastPriceCheckAt),
+      legacy: !!src.legacy
+    };
+  }
+
+  function normalizeState(input) {
+    var migrated = L.migrateState(input);
+    var src = migrated && typeof migrated === 'object' ? migrated : defaultState();
+    var accounts = {};
+
+    Object.keys(src.accounts || {}).forEach(function (id) {
+      if (!id) return;
+      accounts[String(id)] = sanitizeAccount(src.accounts[id]);
+    });
+
+    var activeAccountId = stringOrNull(src.activeAccountId);
+    if (activeAccountId && !accounts[activeAccountId]) {
+      activeAccountId = null;
+    }
+    if (!activeAccountId) {
+      activeAccountId = Object.keys(accounts)[0] || null;
+    }
+
+    return {
+      schemaVersion: 2,
+      activeAccountId: activeAccountId,
+      accounts: accounts,
+      latestVersion: stringOrNull(src.latestVersion),
+      lastUpdateCheckAt: numberOrZero(src.lastUpdateCheckAt)
     };
   }
 
@@ -948,6 +1090,37 @@
     var clean = normalizeState(state);
     GM_setValue(STORE_KEY, clean);
     return clean;
+  }
+
+  function getActiveAccount(state) {
+    if (!state || !state.activeAccountId || !state.accounts) return null;
+    return state.accounts[state.activeAccountId] || null;
+  }
+
+  function ensureAccount(state, id, label) {
+    if (!state.accounts) state.accounts = {};
+    var accountId = id || '__legacy__';
+    var nextLabel = label && String(label).trim() ? String(label) : 'Account';
+
+    if (!state.accounts[accountId]) {
+      state.accounts[accountId] = {
+        label: nextLabel,
+        warehouseNumber: null,
+        clientId: null,
+        items: {},
+        lastScrapeAt: 0,
+        lastPriceCheckAt: 0,
+        legacy: accountId === '__legacy__'
+      };
+    } else {
+      var acct = state.accounts[accountId];
+      if (label && (!acct.label || acct.label === 'Account' || acct.label === 'Imported' || acct.legacy)) {
+        acct.label = nextLabel;
+      }
+      if (!acct.items) acct.items = {};
+    }
+
+    return state.accounts[accountId];
   }
 
   function sleep(ms) {
@@ -1083,8 +1256,12 @@
         capturedAuth.warehouseNumber = whs;
       }
       var state = loadState();
-      if (state.warehouseNumber !== whs) {
-        state.warehouseNumber = whs;
+      var email = L.extractAccountEmail(extracted.bcOrders);
+      var id = L.accountIdFromEmail(email);
+      var account = id ? ensureAccount(state, id, L.maskEmail(email)) : getActiveAccount(state);
+      if (account && account.warehouseNumber !== whs) {
+        account.warehouseNumber = whs;
+        if (id) state.activeAccountId = id;
         saveState(state);
       }
     } catch (err) {
@@ -1237,7 +1414,8 @@
     }
 
     var state = loadState();
-    var whs = capturedAuth.warehouseNumber || state.warehouseNumber || DEFAULT_WAREHOUSE_NUMBER;
+    var activeAccount = getActiveAccount(state);
+    var whs = capturedAuth.warehouseNumber || activeAccount && activeAccount.warehouseNumber || DEFAULT_WAREHOUSE_NUMBER;
     var range = L.dateRangeLast30(Date.now());
     var allOrders = [];
     var detailItems = [];
@@ -1245,24 +1423,45 @@
     var pageSize = 10;
 
     function persistScrape(markComplete) {
-      if (allOrders[0] && allOrders[0].warehouseNumber != null) {
-        state.warehouseNumber = String(allOrders[0].warehouseNumber);
-      } else {
-        state.warehouseNumber = whs;
-      }
-      state.clientId = capturedAuth && (capturedAuth.clientId || capturedAuth.wcsClientId) || state.clientId || DEFAULT_CLIENT_ID;
+      if (allOrders.length === 0) return [];
 
-      var records = L.buildItemRecords(allOrders, detailItems, Date.now());
-      state.items = L.mergeItems(state.items, records, Date.now());
-      state.items = L.pruneExpired(state.items, Date.now());
-      Object.keys(state.items).forEach(function (key) {
-        if (L.isExcludedDescription(state.items[key] && state.items[key].description)) {
-          delete state.items[key];
+      var now = Date.now();
+      var email = L.extractAccountEmail(allOrders);
+      var id = L.accountIdFromEmail(email) || '__legacy__';
+      var label = email ? L.maskEmail(email) : 'Imported';
+      var account = ensureAccount(state, id, label);
+      var legacy = id !== '__legacy__' ? state.accounts.__legacy__ : null;
+
+      if (legacy) {
+        account.items = Object.assign({}, legacy.items || {}, account.items || {});
+        if (!account.warehouseNumber && legacy.warehouseNumber) {
+          account.warehouseNumber = legacy.warehouseNumber;
+        }
+        if (!account.clientId && legacy.clientId) {
+          account.clientId = legacy.clientId;
+        }
+        delete state.accounts.__legacy__;
+      }
+
+      if (allOrders[0] && allOrders[0].warehouseNumber != null) {
+        account.warehouseNumber = String(allOrders[0].warehouseNumber);
+      } else {
+        account.warehouseNumber = whs;
+      }
+      account.clientId = capturedAuth && (capturedAuth.clientId || capturedAuth.wcsClientId) || account.clientId || DEFAULT_CLIENT_ID;
+
+      var records = L.buildItemRecords(allOrders, detailItems, now);
+      account.items = L.mergeItems(account.items, records, now);
+      account.items = L.pruneExpired(account.items, now);
+      Object.keys(account.items).forEach(function (key) {
+        if (L.isExcludedDescription(account.items[key] && account.items[key].description)) {
+          delete account.items[key];
         }
       });
       if (markComplete) {
-        state.lastScrapeAt = Date.now();
+        account.lastScrapeAt = now;
       }
+      state.activeAccountId = id;
       saveState(state);
       return records;
     }
@@ -1327,20 +1526,25 @@
 
   async function refreshPrices(force) {
     var state = loadState();
-    var now = Date.now();
-    if (!force && now - state.lastPriceCheckAt < PRICE_CHECK_INTERVAL) {
+    var account = getActiveAccount(state);
+    if (!account) {
       return { ok: true, skipped: true };
     }
 
-    var whs = state.warehouseNumber || DEFAULT_WAREHOUSE_NUMBER;
-    var clientId = state.clientId || DEFAULT_CLIENT_ID;
-    var monitoredKeys = Object.keys(state.items || {}).filter(function (key) {
-      return L.isMonitored(state.items[key], Date.now()) && !state.items[key].adjusted;
+    var now = Date.now();
+    if (!force && now - account.lastPriceCheckAt < PRICE_CHECK_INTERVAL) {
+      return { ok: true, skipped: true };
+    }
+
+    var whs = account.warehouseNumber || DEFAULT_WAREHOUSE_NUMBER;
+    var clientId = account.clientId || DEFAULT_CLIENT_ID;
+    var monitoredKeys = Object.keys(account.items || {}).filter(function (key) {
+      return L.isMonitored(account.items[key], Date.now()) && !account.items[key].adjusted;
     });
 
     for (var i = 0; i < monitoredKeys.length; i += 1) {
       var key = monitoredKeys[i];
-      var item = state.items[key];
+      var item = account.items[key];
       try {
         var url = PRICE_URL +
           '?whsNumber=' + encodeURIComponent(whs) +
@@ -1354,14 +1558,14 @@
         });
         var json = await res.json();
         var parsed = L.parseDisplayPrice(json);
-        state.items[key] = L.applyPriceUpdate(state.items[key], parsed.onlinePrice, Date.now());
+        account.items[key] = L.applyPriceUpdate(account.items[key], parsed.onlinePrice, Date.now());
       } catch (err) {
         // Leave the item unchanged and continue with the next one.
       }
       await sleep(250);
     }
 
-    state.lastPriceCheckAt = Date.now();
+    account.lastPriceCheckAt = Date.now();
     saveState(state);
     notifyDashboards();
     return { ok: true };
@@ -1399,24 +1603,56 @@
 
   function getDashboardState() {
     var state = loadState();
-    var hasItems = Object.keys(state.items || {}).length > 0;
+    var active = getActiveAccount(state) || {
+      items: {},
+      warehouseNumber: null,
+      clientId: null,
+      lastPriceCheckAt: 0,
+      lastScrapeAt: 0
+    };
+    var hasItems = Object.keys(active.items || {}).length > 0;
     var tokenStale = hasItems && (!capturedAuth || !capturedAuth.bearer) &&
-      (!state.lastScrapeAt || Date.now() - state.lastScrapeAt > TOKEN_STALE_MS);
+      (!active.lastScrapeAt || Date.now() - active.lastScrapeAt > TOKEN_STALE_MS);
     var latest = state.latestVersion;
     var updateAvailable = latest && L.isNewerVersion(latest, CURRENT_VERSION)
       ? { version: latest, current: CURRENT_VERSION, url: UPDATE_DOWNLOAD_URL }
       : null;
-    return Object.assign({}, state, {
+    return {
+      items: active.items || {},
+      warehouseNumber: active.warehouseNumber,
+      clientId: active.clientId,
+      lastPriceCheckAt: active.lastPriceCheckAt || 0,
+      lastScrapeAt: active.lastScrapeAt || 0,
       tokenStale: tokenStale,
       updateAvailable: updateAvailable,
-      currentVersion: CURRENT_VERSION
-    });
+      currentVersion: CURRENT_VERSION,
+      activeAccountId: state.activeAccountId,
+      accounts: Object.keys(state.accounts || {}).map(function (id) {
+        var account = state.accounts[id] || {};
+        return {
+          id: id,
+          label: account.label || 'Account',
+          active: id === state.activeAccountId,
+          itemCount: Object.keys(account.items || {}).length
+        };
+      })
+    };
   }
 
   function markAdjusted(key) {
     var state = loadState();
-    state.items = L.markItemAdjusted(state.items, key, Date.now());
+    var account = getActiveAccount(state);
+    if (!account) return;
+    account.items = L.markItemAdjusted(account.items, key, Date.now());
     saveState(state);
+  }
+
+  function switchAccount(id) {
+    var state = loadState();
+    if (state.accounts && state.accounts[id]) {
+      state.activeAccountId = id;
+      saveState(state);
+    }
   }
 
   function checkForUpdate(force) {
@@ -1501,6 +1737,10 @@
         },
         markAdjusted: async function (key) {
           markAdjusted(key);
+          mountOverlay();
+        },
+        switchAccount: function (id) {
+          switchAccount(id);
           mountOverlay();
         },
         close: function () {

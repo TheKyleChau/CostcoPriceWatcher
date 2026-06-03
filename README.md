@@ -10,6 +10,7 @@ A single-file [Tampermonkey](https://www.tampermonkey.net/) userscript that trac
 - Per-item actions: open the order, open the product page (works by direct URL even when an item is pulled from search), and Mark Adjusted to clear a completed adjustment so it stops showing (it stays cleared across re-scans).
 - Skips E-Delivery $0 add-ons and cancelled line items automatically.
 - Auto-updates through Tampermonkey from costco.kyle.jp, and shows an "update available" banner in the dashboard when a newer version is published.
+- Multiple Costco accounts: each account gets its own ledger, auto-detected on scan, with an account switcher in the dashboard. Accounts are keyed by a non-reversible hash of the account email; only a masked label is stored for display.
 
 ## Install
 
