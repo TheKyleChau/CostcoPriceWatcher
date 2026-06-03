@@ -9,6 +9,7 @@ A single-file [Tampermonkey](https://www.tampermonkey.net/) userscript that trac
 - Dashboard overlay (Tampermonkey menu → Open dashboard) showing paid-vs-current price, drop amount, days left in the window, and your total potential refund.
 - Per-item actions: open the order, open the product page (works by direct URL even when an item is pulled from search), and Mark Adjusted to clear a completed adjustment so it stops showing (it stays cleared across re-scans).
 - Skips E-Delivery $0 add-ons and cancelled line items automatically.
+- Auto-updates through Tampermonkey from costco.kyle.jp, and shows an "update available" banner in the dashboard when a newer version is published.
 
 ## Install
 
@@ -21,6 +22,10 @@ A single-file [Tampermonkey](https://www.tampermonkey.net/) userscript that trac
 1. Log into Costco.com.
 2. Visit Account → Orders & Purchases (Online tab). The scan runs automatically once your orders load.
 3. Click the Tampermonkey icon → "Costco PriceWatch — Open dashboard." The dashboard opens as an overlay on the current tab; press Esc, click outside it, or hit Close to dismiss. Other menu commands: Rescan now, and Refresh prices now.
+
+## Updates
+
+The script declares `@updateURL` and `@downloadURL` pointing at `https://costco.kyle.jp`, so Tampermonkey checks for new versions automatically and prompts to install them. The script also checks once per day on its own and shows an "update available" banner in the dashboard with a link to the new version. To publish an update, host the new `costco-pricewatch.user.js` and `costco-pricewatch.meta.js` at `costco.kyle.jp` with a bumped `@version`.
 
 ## Privacy
 

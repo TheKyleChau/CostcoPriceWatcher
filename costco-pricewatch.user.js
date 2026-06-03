@@ -4,12 +4,16 @@
 // @version      1.0.0
 // @description  Monitor price drops on your own Costco.com purchases (30-day price-adjustment window). Local-only.
 // @match        https://www.costco.com/*
+// @updateURL    https://costco.kyle.jp/costco-pricewatch.meta.js
+// @downloadURL  https://costco.kyle.jp/costco-pricewatch.user.js
+// @connect      costco.kyle.jp
 // @run-at       document-start
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_registerMenuCommand
 // @grant        GM_addValueChangeListener
 // @grant        GM_addStyle
+// @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
 // ==/UserScript==
 
@@ -287,6 +291,27 @@
     return out;
   }
 
+  function compareVersions(a, b) {
+    var pa = String(a || '0').replace(/^v/i, '').split('.').map(function (n) {
+      return parseInt(n, 10) || 0;
+    });
+    var pb = String(b || '0').replace(/^v/i, '').split('.').map(function (n) {
+      return parseInt(n, 10) || 0;
+    });
+    var len = Math.max(pa.length, pb.length);
+    for (var i = 0; i < len; i += 1) {
+      var x = pa[i] || 0;
+      var y = pb[i] || 0;
+      if (x > y) return 1;
+      if (x < y) return -1;
+    }
+    return 0;
+  }
+
+  function isNewerVersion(remote, current) {
+    return compareVersions(remote, current) > 0;
+  }
+
   function summarize(items, now) {
     var monitored = Object.values(items || {}).filter(function (item) {
       return isMonitored(item, now) && !item.adjusted;
@@ -320,6 +345,8 @@
     pruneExpired: pruneExpired,
     isExcludedDescription: isExcludedDescription,
     markItemAdjusted: markItemAdjusted,
+    compareVersions: compareVersions,
+    isNewerVersion: isNewerVersion,
     summarize: summarize,
     MS_DAY: MS_DAY,
     MONITOR_DAYS: MONITOR_DAYS
@@ -472,6 +499,16 @@
     border:2px dashed #c2311c; color:#9a2a18; background:rgba(194,49,28,.06);
     padding:9px 12px; font-size:11.5px; letter-spacing:.06em; text-align:center; margin:6px 0 14px;
   }
+  .${NS}-update{
+    display:flex; align-items:center; justify-content:space-between; gap:10px;
+    border:2px solid #1c4e8a; color:#1c4e8a; background:rgba(28,78,138,.07);
+    padding:9px 12px; font-size:11.5px; font-weight:700; letter-spacing:.06em; margin:6px 0 14px;
+  }
+  .${NS}-update a{
+    color:#1c4e8a; text-decoration:none; border:1.5px solid #1c4e8a; border-radius:2px;
+    padding:4px 8px; font-size:10px; white-space:nowrap; transition:background .15s ease, color .15s ease;
+  }
+  .${NS}-update a:hover{ background:#1c4e8a; color:#f4efe3; }
 
   .${NS}-foot{ text-align:center; margin-top:6px; }
   .${NS}-thanks{ font-size:12px; letter-spacing:.3em; color:#3f3a33; margin:14px 0 6px; }
@@ -585,6 +622,18 @@
     r.appendChild(meta);
 
     r.appendChild(el('hr', c('rule')));
+
+    // --- update-available banner ---
+    if (state.updateAvailable && state.updateAvailable.version) {
+      const up = el('div', c('update'));
+      up.appendChild(el('span', null, '⬆ UPDATE AVAILABLE · v' + state.updateAvailable.version));
+      const a = el('a', null, 'GET UPDATE ↗');
+      a.href = state.updateAvailable.url || 'https://costco.kyle.jp/costco-pricewatch.user.js';
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      up.appendChild(a);
+      r.appendChild(up);
+    }
 
     // --- stale token banner ---
     if (state.tokenStale) {
@@ -723,6 +772,7 @@
     const foot = el('div', c('foot'));
     foot.appendChild(el('div', c('thanks'), '★ SAVED LOCALLY ★'));
     foot.appendChild(el('div', c('fineprint'), 'Stored on this device only · No account data leaves your browser'));
+    if (state.currentVersion) foot.appendChild(el('div', c('fineprint'), 'PriceWatch v' + state.currentVersion));
     r.appendChild(foot);
 
     scrim.appendChild(r);
@@ -750,6 +800,10 @@
   var DEFAULT_CLIENT_ID = '4900eb1f-0c10-4bd9-99c3-c59e6c1ecebf';
   var PRICE_CLIENT_IDENTIFIER = '6b262714-2ed4-4dcb-a39d-39a4b0357309'; // Registered client-identifier for gdx-api display-price-lite (from Costco frontend; public, validated by Apigee).
   var TOKEN_STALE_MS = 15 * 60 * 1000;
+  var UPDATE_META_URL = 'https://costco.kyle.jp/costco-pricewatch.meta.js';
+  var UPDATE_DOWNLOAD_URL = 'https://costco.kyle.jp/costco-pricewatch.user.js';
+  var UPDATE_CHECK_INTERVAL = 24 * 3600 * 1000;
+  var CURRENT_VERSION = typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.version ? String(GM_info.script.version) : '0.0.0';
 
   var capturedAuth = null;
   var dashboardListenerInstalled = false;
@@ -808,6 +862,8 @@
       items: {},
       lastScrapeAt: 0,
       lastPriceCheckAt: 0,
+      latestVersion: null,
+      lastUpdateCheckAt: 0,
       warehouseNumber: null,
       clientId: null
     };
@@ -873,6 +929,8 @@
       items: items,
       lastScrapeAt: numberOrZero(src.lastScrapeAt != null ? src.lastScrapeAt : base.lastScrapeAt),
       lastPriceCheckAt: numberOrZero(src.lastPriceCheckAt != null ? src.lastPriceCheckAt : base.lastPriceCheckAt),
+      latestVersion: stringOrNull(src.latestVersion != null ? src.latestVersion : base.latestVersion),
+      lastUpdateCheckAt: numberOrZero(src.lastUpdateCheckAt != null ? src.lastUpdateCheckAt : base.lastUpdateCheckAt),
       warehouseNumber: stringOrNull(src.warehouseNumber != null ? src.warehouseNumber : base.warehouseNumber),
       clientId: stringOrNull(src.clientId != null ? src.clientId : base.clientId)
     };
@@ -1344,13 +1402,69 @@
     var hasItems = Object.keys(state.items || {}).length > 0;
     var tokenStale = hasItems && (!capturedAuth || !capturedAuth.bearer) &&
       (!state.lastScrapeAt || Date.now() - state.lastScrapeAt > TOKEN_STALE_MS);
-    return Object.assign({}, state, { tokenStale: tokenStale });
+    var latest = state.latestVersion;
+    var updateAvailable = latest && L.isNewerVersion(latest, CURRENT_VERSION)
+      ? { version: latest, current: CURRENT_VERSION, url: UPDATE_DOWNLOAD_URL }
+      : null;
+    return Object.assign({}, state, {
+      tokenStale: tokenStale,
+      updateAvailable: updateAvailable,
+      currentVersion: CURRENT_VERSION
+    });
   }
 
   function markAdjusted(key) {
     var state = loadState();
     state.items = L.markItemAdjusted(state.items, key, Date.now());
     saveState(state);
+  }
+
+  function checkForUpdate(force) {
+    return new Promise(function (resolve) {
+      try {
+        var state = loadState();
+        if (!force && Date.now() - state.lastUpdateCheckAt < UPDATE_CHECK_INTERVAL) {
+          resolve({ skipped: true });
+          return;
+        }
+
+        if (typeof GM_xmlhttpRequest !== 'function') {
+          resolve({ ok: false });
+          return;
+        }
+
+        function saveAttempt(ok, responseText) {
+          try {
+            var match = /@version\s+([^\s]+)/.exec(responseText || '');
+            var remote = match ? match[1] : null;
+            var next = loadState();
+            if (remote) next.latestVersion = remote;
+            next.lastUpdateCheckAt = Date.now();
+            saveState(next);
+          } catch (err) {
+            // Update check state is best-effort.
+          }
+          resolve(ok ? { ok: true } : { ok: false });
+        }
+
+        GM_xmlhttpRequest({
+          method: 'GET',
+          url: UPDATE_META_URL,
+          timeout: 10000,
+          onload: function (response) {
+            saveAttempt(true, response && response.responseText);
+          },
+          onerror: function () {
+            saveAttempt(false, '');
+          },
+          ontimeout: function () {
+            saveAttempt(false, '');
+          }
+        });
+      } catch (err) {
+        resolve({ ok: false });
+      }
+    });
   }
 
   function onReady(fn) {
@@ -1370,6 +1484,7 @@
       }
 
       ensureStyle();
+      checkForUpdate(false);
 
       var existing = document.querySelector('.cpw-scrim');
       if (existing) existing.remove();
@@ -1461,6 +1576,9 @@
   function main() {
     installAuthSniffer();
     registerMenuCommands();
+    setTimeout(function () {
+      checkForUpdate(false);
+    }, 6000);
 
     if (isOrdersPage()) {
       runOrdersScrapeWhenReady();
