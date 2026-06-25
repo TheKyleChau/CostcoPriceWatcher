@@ -26,7 +26,9 @@ A single-file [Tampermonkey](https://www.tampermonkey.net/) userscript that trac
 
 ## Updates
 
-The script declares `@updateURL` and `@downloadURL` pointing at `https://costco.kyle.jp`, so Tampermonkey checks for new versions automatically and prompts to install them. The script also checks once per day on its own and shows an "update available" banner in the dashboard with a link to the new version. To publish an update, host the new `costco-pricewatch.user.js` and `costco-pricewatch.meta.js` at `costco.kyle.jp` with a bumped `@version`.
+The script declares `@updateURL` and `@downloadURL` pointing at `https://costco.kyle.jp`, so Tampermonkey checks for new versions automatically and prompts to install them. The script also checks for a newer version before each scan and shows an "update available" banner in the dashboard with a link to it.
+
+`costco.kyle.jp` may redirect to GitHub raw content, so the script whitelists `costco.kyle.jp`, `raw.githubusercontent.com`, and `githubusercontent.com` for the update check. To publish an update, serve the new `costco-pricewatch.user.js` and `costco-pricewatch.meta.js` from `costco.kyle.jp` (e.g. redirecting to the repo's `main`) with a bumped `@version`.
 
 ## Privacy
 

@@ -1,12 +1,14 @@
 // ==UserScript==
 // @name         Costco PriceWatch
 // @namespace    local.costco.pricewatch
-// @version      1.0.1
+// @version      1.0.2
 // @description  Monitor price drops on your own Costco.com purchases (30-day price-adjustment window). Local-only.
 // @match        https://www.costco.com/*
 // @updateURL    https://costco.kyle.jp/costco-pricewatch.meta.js
 // @downloadURL  https://costco.kyle.jp/costco-pricewatch.user.js
 // @connect      costco.kyle.jp
+// @connect      raw.githubusercontent.com
+// @connect      githubusercontent.com
 // @run-at       document-start
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -331,11 +333,17 @@
   function parseDisplayPrice(json) {
     var priceData = json && json.priceData;
     var online = numOrNull(priceData && priceData.displayPrice && priceData.displayPrice.onlinePrice);
+    var delivered = numOrNull(priceData && priceData.displayPrice && priceData.displayPrice.deliveredPrice);
     var list = numOrNull(priceData && priceData.sourcePrice && priceData.sourcePrice.listPrice);
     if (list === -1) list = null;
+    // deliveredPrice is the actual price a customer pays now (after any active promotions/coupons).
+    // Fall back to onlinePrice when deliveredPrice is absent or identical.
+    var effectivePrice = (delivered != null && delivered !== online) ? delivered : online;
     return {
       onlinePrice: online,
-      listPrice: list
+      deliveredPrice: delivered,
+      listPrice: list,
+      effectivePrice: effectivePrice
     };
   }
 
@@ -629,6 +637,8 @@
   .${NS}-btn[disabled]{ opacity:.45; cursor:progress; }
   .${NS}-btn-close{ border-color:#c2311c; color:#c2311c; }
   .${NS}-btn-close:hover{ background:#c2311c; color:#f4efe3; }
+  .${NS}-btn-export{ border-color:#1c4e8a; color:#1c4e8a; }
+  .${NS}-btn-export:hover{ background:#1c4e8a; color:#f4efe3; }
 
   .${NS}-spin{ display:inline-block; animation:${NS}-spin 1s steps(8) infinite; }
   @keyframes ${NS}-spin{to{transform:rotate(360deg)}}
@@ -675,6 +685,38 @@
     return n;
   }
   function c(name) { return NS + '-' + name; }
+
+  function exportDropsCsv(state) {
+    const now = Date.now();
+    const accountLabel = (Array.isArray(state.accounts) && state.accounts.find((a) => a.active) || {}).label || '';
+    const items = Object.entries(state.items || {}).map((e) => Object.assign({ _key: e[0] }, e[1]));
+    const drops = items.filter((it) => isMonitored(it, now) && !it.adjusted && dropOf(it) > 0);
+
+    const csvEscape = (v) => {
+      const s = v == null ? '' : String(v);
+      return s.includes(',') || s.includes('"') || s.includes('\n') ? '"' + s.replace(/"/g, '""') + '"' : s;
+    };
+    const rows = [['order_number', 'email', 'original_price', 'price_drop', 'price_diff']];
+    drops.forEach((it) => {
+      rows.push([
+        it.orderNumber || '',
+        accountLabel,
+        it.paidPrice != null ? it.paidPrice.toFixed(2) : '',
+        it.currentPrice != null ? it.currentPrice.toFixed(2) : '',
+        dropOf(it).toFixed(2)
+      ]);
+    });
+
+    const csv = rows.map((r) => r.map(csvEscape).join(',')).join('\r\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'costco-pricewatch-drops.csv';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 100);
+  }
 
   function renderDashboard(root, state, actions) {
     state = state || {};
@@ -884,6 +926,9 @@
     };
     actbar.appendChild(mkBtn('RESCAN', null, actions.rescan));
     actbar.appendChild(mkBtn('REFRESH PRICES', null, actions.refreshPrices));
+    if (drops.length > 0) {
+      actbar.appendChild(mkBtn('EXPORT CSV', c('btn-export'), () => exportDropsCsv(state)));
+    }
     actbar.appendChild(mkBtn('CLOSE', c('btn-close'), actions.close));
     r.appendChild(actbar);
 
@@ -1409,6 +1454,8 @@
   }
 
   async function scrapeLast30() {
+    checkForUpdate(true);
+
     if (!capturedAuth || !capturedAuth.bearer) {
       return { ok: false, reason: 'NO_TOKEN' };
     }
@@ -1558,7 +1605,7 @@
         });
         var json = await res.json();
         var parsed = L.parseDisplayPrice(json);
-        account.items[key] = L.applyPriceUpdate(account.items[key], parsed.onlinePrice, Date.now());
+        account.items[key] = L.applyPriceUpdate(account.items[key], parsed.effectivePrice, Date.now());
       } catch (err) {
         // Leave the item unchanged and continue with the next one.
       }
@@ -1720,7 +1767,6 @@
       }
 
       ensureStyle();
-      checkForUpdate(false);
 
       var existing = document.querySelector('.cpw-scrim');
       if (existing) existing.remove();
@@ -1816,9 +1862,6 @@
   function main() {
     installAuthSniffer();
     registerMenuCommands();
-    setTimeout(function () {
-      checkForUpdate(false);
-    }, 6000);
 
     if (isOrdersPage()) {
       runOrdersScrapeWhenReady();
