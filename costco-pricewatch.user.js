@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Costco PriceWatch
 // @namespace    local.costco.pricewatch
-// @version      1.0.2
+// @version      1.0.3
 // @description  Monitor price drops on your own Costco.com purchases (30-day price-adjustment window). Local-only.
 // @match        https://www.costco.com/*
 // @updateURL    https://costco.kyle.jp/costco-pricewatch.meta.js
@@ -198,8 +198,26 @@
     var out = [];
 
     asArray(details).forEach(function (detail) {
+      var orderMerchandiseTotal = numOrNull(detail && detail.merchandiseTotal);
+      var orderDiscountAmount = numOrNull(detail && detail.discountAmount);
+      var hasDiscount = orderDiscountAmount != null && orderDiscountAmount > 0 &&
+        orderMerchandiseTotal != null && orderMerchandiseTotal > 0;
+
       asArray(detail && detail.shipToAddress).forEach(function (ship) {
         asArray(ship && ship.orderLineItems).forEach(function (lineItem) {
+          var rawPrice = numOrNull(lineItem.price != null ? lineItem.price : lineItem.unitPrice);
+          var itemMerchandiseTotal = numOrNull(lineItem.merchandiseTotalAmount);
+          var qty = Number(lineItem.quantity != null ? lineItem.quantity : lineItem.orderedTotalQuantity != null ? lineItem.orderedTotalQuantity : 1);
+          if (!Number.isFinite(qty) || qty <= 0) qty = 1;
+
+          // When the order has a discount (e.g. coupon), prorate it across line items by
+          // merchandise value so paidPrice reflects what was actually paid per unit.
+          var effectiveUnitPrice = rawPrice;
+          if (hasDiscount && itemMerchandiseTotal != null && itemMerchandiseTotal > 0) {
+            var effectiveLineTotal = itemMerchandiseTotal * (1 - orderDiscountAmount / orderMerchandiseTotal);
+            effectiveUnitPrice = round2(effectiveLineTotal / qty);
+          }
+
           out.push({
             orderNumber: String(
               lineItem.orderNumber != null ? lineItem.orderNumber : detail && detail.orderNumber != null ? detail.orderNumber : ''
@@ -208,8 +226,8 @@
             itemNumber: String(lineItem.itemNumber != null ? lineItem.itemNumber : ''),
             itemId: lineItem.itemId != null ? String(lineItem.itemId) : null,
             description: lineItem.itemDescription != null ? String(lineItem.itemDescription) : '',
-            paidPrice: numOrNull(lineItem.price != null ? lineItem.price : lineItem.unitPrice),
-            quantity: Number(lineItem.quantity != null ? lineItem.quantity : lineItem.orderedTotalQuantity != null ? lineItem.orderedTotalQuantity : 1)
+            paidPrice: effectiveUnitPrice,
+            quantity: qty
           });
         });
       });
@@ -1005,6 +1023,8 @@
     '    orderNumber: sourceOrderNumber',
     '    orderPlacedDate: orderedDate',
     '    status',
+    '    merchandiseTotal',
+    '    discountAmount',
     '    shipToAddress: orderShipTos {',
     '      orderLineItems {',
     '        itemNumber',

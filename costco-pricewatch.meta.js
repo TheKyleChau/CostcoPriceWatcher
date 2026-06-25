@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Costco PriceWatch
 // @namespace    local.costco.pricewatch
-// @version      1.0.2
+// @version      1.0.3
 // @description  Monitor price drops on your own Costco.com purchases (30-day price-adjustment window). Local-only.
 // @match        https://www.costco.com/*
 // @updateURL    https://costco.kyle.jp/costco-pricewatch.meta.js
